@@ -1,124 +1,242 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Chess } from "chess.js";
+
+import ChessBoard from "./components/ChessBoard";
+import MoveHistory from "./components/MoveHistory";
+import ChessClock from "./components/ChessClock";
+
 import "./App.css";
 
-const symbols = {
-  wk: "♔",
-  wq: "♕",
-  wr: "♖",
-  wb: "♗",
-  wn: "♘",
-  wp: "♙",
-  bk: "♚",
-  bq: "♛",
-  br: "♜",
-  bb: "♝",
-  bn: "♞",
-  bp: "♟",
-};
+const INITIAL_TIME = 5 * 60;
 
 export default function App() {
   const [game, setGame] = useState(() => new Chess());
-  const [selected, setSelected] = useState(null);
-  const [message, setMessage] = useState("");
+  const [selectedSquare, setSelectedSquare] = useState(null);
 
-  // Convert the chess engine's board into React-friendly data.
+  const [history, setHistory] = useState([]);
+  const [moveRecords, setMoveRecords] = useState([]);
+  const [positionHistory, setPositionHistory] = useState([]);
+
+  const [whiteTime, setWhiteTime] = useState(INITIAL_TIME);
+  const [blackTime, setBlackTime] = useState(INITIAL_TIME);
+  const [flagged, setFlagged] = useState(null);
+  const [gameId, setGameId] = useState(0);
+
+  const activeColor = game.turn();
+  const gameOver = game.isGameOver() || flagged !== null;
+
+  // Find the legal destinations for the selected piece.
+  const legalMoves = selectedSquare
+    ? game
+        .moves({ square: selectedSquare, verbose: true })
+        .map((move) => move.to)
+    : [];
+
   const board = game.board();
 
-  function handleSquareClick(row, col) {
-    const square = `${"abcdefgh"[col]}${8 - row}`;
-    const piece = board[row][col];
+  const lastMove = moveRecords[moveRecords.length - 1] ?? null;
 
-    // If a piece is selected, try to move it.
-    if (selected) {
-      try {
-        const move = game.move({
-          from: selected,
-          to: square,
-          promotion: "q",
-        });
+  // Find the king's square when that king is in check.
+  let checkedKing = null;
 
-        if (move) {
-          setGame(new Chess(game.fen()));
-          setSelected(null);
-
-          if (game.isCheckmate()) {
-            setMessage(
-              `Checkmate! ${game.turn() === "w" ? "Black" : "White"} wins!`
-            );
-          } else if (game.isDraw()) {
-            setMessage("Game drawn!");
-          } else {
-            setMessage(game.isCheck() ? "Check!" : "");
-          }
-
-          return;
+  if (game.isCheck()) {
+    board.forEach((rank, row) => {
+      rank.forEach((piece, col) => {
+        if (
+          piece?.type === "k" &&
+          piece.color === activeColor
+        ) {
+          checkedKing = `${"abcdefgh"[col]}${8 - row}`;
         }
-      } catch {
-        // The move is illegal. Let the player select another piece.
+      });
+    });
+  }
+
+  // Run the clock for the active player.
+  useEffect(() => {
+    if (gameOver) return;
+
+    const interval = setInterval(() => {
+      if (activeColor === "w") {
+        setWhiteTime((time) => Math.max(0, time - 1));
+      } else {
+        setBlackTime((time) => Math.max(0, time - 1));
       }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [activeColor, gameOver, gameId]);
+
+  // Detect when a player's time runs out.
+  useEffect(() => {
+    if (!gameOver && whiteTime === 0) {
+      setFlagged("w");
+    } else if (!gameOver && blackTime === 0) {
+      setFlagged("b");
+    }
+  }, [whiteTime, blackTime, gameOver]);
+
+  function handleSquareClick(square) {
+    if (gameOver) return;
+
+    const piece = game.get(square);
+
+    // If the selected piece can legally move here, make the move.
+    if (selectedSquare && legalMoves.includes(square)) {
+      const nextGame = new Chess(game.fen());
+
+      const move = nextGame.move({
+        from: selectedSquare,
+        to: square,
+        promotion: "q",
+      });
+
+      if (move) {
+        setPositionHistory((previous) => [
+          ...previous,
+          game.fen(),
+        ]);
+
+        setHistory((previous) => [...previous, move.san]);
+        setMoveRecords((previous) => [...previous, move]);
+
+        setGame(nextGame);
+        setSelectedSquare(null);
+      }
+
+      return;
     }
 
-    // Select a piece belonging to the player whose turn it is.
-    if (piece && piece.color === game.turn()) {
-      setSelected(square);
-      setMessage("");
+    // Otherwise, select a piece belonging to the current player.
+    if (piece && piece.color === activeColor) {
+      setSelectedSquare(square);
     } else {
-      setSelected(null);
+      setSelectedSquare(null);
     }
+  }
+
+  function undoMove() {
+    if (positionHistory.length === 0 || flagged !== null) return;
+
+    const previousFen =
+      positionHistory[positionHistory.length - 1];
+
+    setGame(new Chess(previousFen));
+    setPositionHistory((previous) => previous.slice(0, -1));
+    setHistory((previous) => previous.slice(0, -1));
+    setMoveRecords((previous) => previous.slice(0, -1));
+    setSelectedSquare(null);
+    setFlagged(null);
   }
 
   function restartGame() {
     setGame(new Chess());
-    setSelected(null);
-    setMessage("");
+    setSelectedSquare(null);
+    setHistory([]);
+    setMoveRecords([]);
+    setPositionHistory([]);
+    setWhiteTime(INITIAL_TIME);
+    setBlackTime(INITIAL_TIME);
+    setFlagged(null);
+    setGameId((id) => id + 1);
   }
 
-  const gameOver = game.isGameOver();
+  let status;
+
+  if (flagged) {
+    status = `${flagged === "w" ? "White" : "Black"} ran out of time. ${
+      flagged === "w" ? "Black" : "White"
+    } wins!`;
+  } else if (game.isCheckmate()) {
+    status = `Checkmate! ${activeColor === "w" ? "Black" : "White"} wins!`;
+  } else if (game.isStalemate()) {
+    status = "Draw by stalemate.";
+  } else if (game.isDraw()) {
+    status = "The game is a draw.";
+  } else if (game.isCheck()) {
+    status = `${activeColor === "w" ? "White" : "Black"} is in check!`;
+  } else {
+    status = `${activeColor === "w" ? "White" : "Black"} to move`;
+  }
 
   return (
-    <main className="game">
-      <h1>React Chess</h1>
+    <main className="app">
+      <header className="app-header">
+        <div>
+          <p className="eyebrow">TWO-PLAYER GAME</p>
+          <h1>React Chess</h1>
+          <p className="subtitle">
+            Think ahead. Make your move.
+          </p>
+        </div>
 
-      <p>
-        {message ||
-          (gameOver
-            ? "Game over"
-            : `${game.turn() === "w" ? "White" : "Black"} to move`)}
-      </p>
+        <button className="new-game" onClick={restartGame}>
+          New Game
+        </button>
+      </header>
 
-      <div className="board">
-        {board.map((rank, row) =>
-          rank.map((piece, col) => {
-            const square = `${"abcdefgh"[col]}${8 - row}`;
-            const isLight = (row + col) % 2 === 0;
-            const isSelected = selected === square;
+      <div className="game-layout">
+        <section className="game-area">
+          <div className="game-status">
+            <span
+              className={`turn-indicator ${
+                activeColor === "w" ? "white-indicator" : "black-indicator"
+              }`}
+            />
+            <span>{status}</span>
+          </div>
 
-            return (
-              <button
-                key={square}
-                className={`square ${isLight ? "light" : "dark"} ${
-                  isSelected ? "selected" : ""
-                }`}
-                onClick={() => handleSquareClick(row, col)}
-                aria-label={`${square}${
-                  piece
-                    ? ` ${piece.color === "w" ? "white" : "black"} ${
-                        piece.type
-                      }`
-                    : ""
-                }`}
-              >
-                {piece && symbols[piece.color + piece.type]}
-              </button>
-            );
-          })
-        )}
+          <ChessClock
+            whiteTime={whiteTime}
+            blackTime={blackTime}
+            activeColor={activeColor}
+          />
+
+          <ChessBoard
+            board={board}
+            selectedSquare={selectedSquare}
+            legalMoves={legalMoves}
+            lastMove={lastMove}
+            checkedKing={checkedKing}
+            onSquareClick={handleSquareClick}
+          />
+
+          <div className="board-footer">
+            <span>White: bottom</span>
+            <span>Moves: {history.length}</span>
+          </div>
+
+          <div className="game-actions">
+            <button
+              className="secondary-button"
+              onClick={undoMove}
+              disabled={positionHistory.length === 0 || flagged !== null}
+            >
+              Undo Move
+            </button>
+
+            <button className="secondary-button" onClick={restartGame}>
+              Restart
+            </button>
+          </div>
+        </section>
+
+        <aside className="sidebar">
+          <MoveHistory history={history} />
+
+          <div className="rules-note">
+            <h3>How to play</h3>
+            <p>Select one of your pieces, then select a highlighted
+              destination to move it.</p>
+            <p>Each player gets five minutes. The clock pauses when
+              the game ends.</p>
+          </div>
+        </aside>
       </div>
 
-      <button className="restart" onClick={restartGame}>
-        New Game
-      </button>
+      <footer className="app-footer">
+        Built with React and chess.js
+      </footer>
     </main>
   );
 }
